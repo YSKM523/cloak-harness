@@ -119,6 +119,45 @@ The API approach uses these helpers from `agent_helpers.py`:
 
 See [`docs/reverse-engineering.md`](docs/reverse-engineering.md) for the methodology and full replay snippets (including GraphQL persisted-query replay).
 
+## Personas
+
+Run multiple identities side by side. Each persona has its own profile (cookies, localStorage, IndexedDB) and a stable fingerprint seed reused across launches:
+
+```bash
+./scripts/start-cloak.sh                       # default persona
+./scripts/start-cloak.sh --persona alice       # named persona
+PERSONA=alice ./scripts/start-cloak.sh         # same
+```
+
+Profiles live under `~/.cloak-harness/personas/<name>/`. The fingerprint seed is generated once per persona and reused, so the same persona always looks like the same machine. Combined with cookie persistence, this drops anti-bot scoring noticeably on returning visits.
+
+## Captcha solver fallback
+
+When a target shows a visible challenge widget (Turnstile / reCAPTCHA), hand it off to a commercial solver via the `solve_and_inject()` helper:
+
+```python
+import os
+widget = find_captcha_widget()
+if widget:
+    token = solve_and_inject(os.environ["CAPSOLVER_KEY"])  # or TWOCAPTCHA_KEY
+```
+
+Supports CapSolver and 2Captcha out of the box. Pricing is typically ~$2 per 1000 challenges. See [`examples/session_with_captcha.py`](examples/session_with_captcha.py) for the full pattern (persona + session reuse + captcha fallback + `cf_clearance` extraction for non-browser HTTP follow-up).
+
+## Audit your stack — `cloak-harness doctor`
+
+Before shipping a scraper, check your stealth stack for leaks:
+
+```bash
+./scripts/doctor.sh > audit-report.md
+```
+
+Probes: `navigator.webdriver` value AND key existence, UA / platform consistency, `window.chrome` presence, plugins/cores/memory plausibility, WebGL renderer, egress IP geolocation vs browser timezone, bot.incolumitas.com (37 vectors), BrowserScan, and produces a markdown report grouped by section with remediation hints.
+
+![doctor demo](docs/media/doctor.gif)
+
+*Sample output: 2 detected leaks (the upstream cloak `'webdriver' in navigator` key residual, and an `America/Toronto` vs `UTC` timezone mismatch — fixable via `cdp('Emulation.setTimezoneOverride', ...)`).*
+
 Run either:
 
 ```bash

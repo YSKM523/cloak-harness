@@ -367,6 +367,235 @@ def page_fetch_json(url, headers=None, method="GET", body=None):
     return js(expr)
 
 
+# --- Session / cookie / persona management --------------------------------
+
+
+def export_cookies(domain=None, urls=None):
+    """Return all cookies from the active browser session, optionally
+    filtered to a domain or to specific URLs.
+
+    Each cookie is a dict with name, value, domain, path, expires, httpOnly,
+    secure, sameSite. Pass the list to import_cookies() in a future session
+    to restore the state.
+    """
+    from browser_harness.helpers import cdp
+    params = {}
+    if urls:
+        params["urls"] = urls
+    result = cdp("Network.getAllCookies" if not urls else "Network.getCookies", **params)
+    cookies = result.get("cookies", [])
+    if domain:
+        cookies = [c for c in cookies if domain in (c.get("domain") or "")]
+    return cookies
+
+
+def import_cookies(cookies):
+    """Restore cookies from a list previously returned by export_cookies()."""
+    from browser_harness.helpers import cdp
+    for c in cookies:
+        # Only forward the fields CDP setCookie accepts
+        params = {k: c[k] for k in
+                  ("name", "value", "domain", "path", "expires", "httpOnly",
+                   "secure", "sameSite", "url")
+                  if k in c}
+        try:
+            cdp("Network.setCookie", **params)
+        except Exception:
+            pass
+
+
+def get_cf_clearance(domain=None):
+    """Pull the Cloudflare clearance cookie (`cf_clearance`) for use with
+    direct, non-browser HTTP clients. After passing a CF challenge once,
+    this value lets you hit the same origin from curl/requests for the
+    cookie's lifetime (typically ~30 minutes).
+    """
+    for c in export_cookies(domain=domain):
+        if c.get("name") == "cf_clearance":
+            return c["value"]
+    return None
+
+
+def save_session(path):
+    """Persist cookies + localStorage of the active tab to a JSON file."""
+    import json as _json
+    from browser_harness.helpers import js
+    data = {
+        "cookies": export_cookies(),
+        "localStorage": js("return JSON.stringify(Object.fromEntries(Object.entries(window.localStorage)))"),
+    }
+    with open(path, "w") as f:
+        _json.dump(data, f)
+
+
+def load_session(path):
+    """Restore a session previously written by save_session()."""
+    import json as _json
+    from browser_harness.helpers import js
+    with open(path) as f:
+        data = _json.load(f)
+    if data.get("cookies"):
+        import_cookies(data["cookies"])
+    ls = data.get("localStorage")
+    if ls:
+        js("const d = " + ls + "; for (const k in d) window.localStorage.setItem(k, d[k]); return 'ok'")
+
+
+# --- Captcha solver integration -------------------------------------------
+
+_CAPTCHA_PROVIDERS = {
+    "capsolver": {
+        "create": "https://api.capsolver.com/createTask",
+        "result": "https://api.capsolver.com/getTaskResult",
+    },
+    "2captcha": {
+        "create": "https://api.2captcha.com/createTask",
+        "result": "https://api.2captcha.com/getTaskResult",
+    },
+}
+
+
+def find_captcha_widget():
+    """Detect a visible Turnstile or reCAPTCHA widget on the active page.
+
+    Returns dict {type, sitekey, page_url, action?} or None.
+    """
+    from browser_harness.helpers import js
+    import json as _json
+    raw = js("""
+        const turnstile = document.querySelector('.cf-turnstile[data-sitekey], [data-sitekey][data-callback], iframe[src*=turnstile]');
+        const recaptcha = document.querySelector('.g-recaptcha[data-sitekey], iframe[src*=recaptcha]');
+        function siteKey(el) {
+            if (!el) return null;
+            if (el.dataset && el.dataset.sitekey) return el.dataset.sitekey;
+            const src = el.getAttribute && el.getAttribute('src');
+            if (src) {
+                const m = src.match(/k=([^&]+)/);
+                if (m) return m[1];
+            }
+            return null;
+        }
+        if (turnstile) {
+            return JSON.stringify({type: 'turnstile', sitekey: siteKey(turnstile), action: turnstile.dataset && turnstile.dataset.action || null});
+        }
+        if (recaptcha) {
+            return JSON.stringify({type: 'recaptcha', sitekey: siteKey(recaptcha)});
+        }
+        return null;
+    """)
+    if not raw:
+        return None
+    info = _json.loads(raw)
+    if not info.get("sitekey"):
+        return None
+    from browser_harness.helpers import js as _js
+    info["page_url"] = _js("return window.location.href")
+    return info
+
+
+def solve_captcha(api_key, type, sitekey, page_url, action=None,
+                  provider="capsolver", poll_interval=3.0, timeout=180.0):
+    """Submit a captcha to a solver service and poll for the token.
+
+    Args:
+        api_key: solver service API key
+        type: "turnstile" or "recaptcha"
+        sitekey: site key extracted from the widget
+        page_url: URL of the page containing the widget
+        action: optional Turnstile action / reCAPTCHA v3 action
+        provider: "capsolver" or "2captcha"
+        poll_interval: seconds between getTaskResult polls
+        timeout: seconds before giving up
+
+    Returns the solved token string.
+    """
+    import time as _time
+    import urllib.request as _ur
+    import urllib.error as _ue
+    import json as _json
+
+    if provider not in _CAPTCHA_PROVIDERS:
+        raise ValueError(f"unknown provider: {provider}")
+    urls = _CAPTCHA_PROVIDERS[provider]
+
+    task_type_map = {
+        "turnstile": "AntiTurnstileTaskProxyLess",
+        "recaptcha": "ReCaptchaV2TaskProxyLess",
+        "recaptcha_v3": "ReCaptchaV3TaskProxyLess",
+    }
+    task = {
+        "type": task_type_map.get(type, type),
+        "websiteURL": page_url,
+        "websiteKey": sitekey,
+    }
+    if action and type in ("turnstile", "recaptcha_v3"):
+        task["metadata" if provider == "capsolver" else "action"] = (
+            {"action": action} if provider == "capsolver" else action
+        )
+
+    def _post(url, body):
+        req = _ur.Request(
+            url, data=_json.dumps(body).encode(),
+            headers={"content-type": "application/json"},
+        )
+        with _ur.urlopen(req, timeout=30) as r:
+            return _json.loads(r.read())
+
+    create = _post(urls["create"], {"clientKey": api_key, "task": task})
+    if create.get("errorId"):
+        raise RuntimeError(f"{provider} createTask failed: {create.get('errorDescription') or create}")
+    task_id = create["taskId"]
+
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        _time.sleep(poll_interval)
+        res = _post(urls["result"], {"clientKey": api_key, "taskId": task_id})
+        if res.get("status") == "ready":
+            sol = res.get("solution") or {}
+            return sol.get("token") or sol.get("gRecaptchaResponse") or sol.get("text")
+        if res.get("errorId"):
+            raise RuntimeError(f"{provider} getTaskResult failed: {res.get('errorDescription') or res}")
+    raise TimeoutError(f"captcha not solved within {timeout}s")
+
+
+def inject_captcha_token(token, widget_type="turnstile"):
+    """Stuff a solved token into the page's hidden captcha response field
+    and dispatch the input/change events so the host page picks it up.
+    """
+    from browser_harness.helpers import js
+    selector = {
+        "turnstile": 'input[name="cf-turnstile-response"]',
+        "recaptcha": 'textarea[name="g-recaptcha-response"]',
+    }.get(widget_type, 'input[name="cf-turnstile-response"]')
+    return js(f"""
+        const els = document.querySelectorAll({selector!r});
+        if (!els.length) return false;
+        els.forEach(el => {{
+            el.style.display = 'block';
+            el.value = {token!r};
+            el.dispatchEvent(new Event('input', {{bubbles: true}}));
+            el.dispatchEvent(new Event('change', {{bubbles: true}}));
+        }});
+        return els.length;
+    """)
+
+
+def solve_and_inject(api_key, provider="capsolver"):
+    """End-to-end: detect widget, solve, inject token. Returns the token,
+    or None if no widget was found.
+    """
+    widget = find_captcha_widget()
+    if not widget:
+        return None
+    token = solve_captcha(
+        api_key, type=widget["type"],
+        sitekey=widget["sitekey"], page_url=widget["page_url"],
+        action=widget.get("action"), provider=provider,
+    )
+    inject_captcha_token(token, widget_type=widget["type"])
+    return token
+
+
 # --- API discovery and replay ---------------------------------------------
 
 import re as _re
