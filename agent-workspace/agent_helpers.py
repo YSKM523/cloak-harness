@@ -250,6 +250,104 @@ def _bounding_box(selector):
     return js(expr)
 
 
+def install_xhr_recorder():
+    """Inject a fetch + XMLHttpRequest interceptor that survives navigations
+    and accumulates `window._req` with one entry per request.
+
+    Each entry has: {t, url, method, status, ct, bodyHead, xhr?}.
+    `bodyHead` is the first 600 chars of the response body (text/JSON only).
+
+    Use to reverse-engineer a site's hidden JSON APIs before scripting them
+    directly. Typical flow:
+        install_xhr_recorder()
+        goto_url("https://target/...")
+        wait(5)
+        observed = recorded_requests()
+        # inspect, then call the discovered endpoint via page_fetch_json()
+    """
+    from browser_harness.helpers import cdp
+    cdp("Page.addScriptToEvaluateOnNewDocument", source="""
+        window._req = window._req || [];
+        if (!window._fetchHooked) {
+            window._fetchHooked = true;
+            const origFetch = window.fetch;
+            window.fetch = async function(...args) {
+                const url = typeof args[0] === 'string' ? args[0] : args[0].url;
+                const opts = args[1] || {};
+                const t = performance.now();
+                try {
+                    const r = await origFetch.apply(this, args);
+                    const ct = r.headers.get('content-type') || '';
+                    let bodyHead = '';
+                    if (ct.includes('json') || ct.includes('text')) {
+                        try { bodyHead = (await r.clone().text()).slice(0, 600); } catch(e) {}
+                    }
+                    window._req.push({t: Math.round(t), url, method: opts.method||'GET', status: r.status, ct, bodyHead});
+                    return r;
+                } catch(e) {
+                    window._req.push({t: Math.round(t), url, method: opts.method||'GET', status: 'ERR', error: String(e)});
+                    throw e;
+                }
+            };
+            const origOpen = XMLHttpRequest.prototype.open;
+            const origSend = XMLHttpRequest.prototype.send;
+            XMLHttpRequest.prototype.open = function(method, url) { this._url=url; this._method=method; return origOpen.apply(this, arguments); };
+            XMLHttpRequest.prototype.send = function() {
+                this.addEventListener('load', () => {
+                    let bodyHead = '';
+                    try { bodyHead = (this.responseText || '').slice(0, 600); } catch(e) {}
+                    window._req.push({t: Math.round(performance.now()), url: this._url, method: this._method, status: this.status, ct: this.getResponseHeader('content-type')||'', bodyHead, xhr: true});
+                });
+                return origSend.apply(this, arguments);
+            };
+        }
+    """)
+
+
+def recorded_requests(only_json=False, host_substr=None):
+    """Return the list of requests captured since install_xhr_recorder().
+
+    Args:
+        only_json: If True, return only responses whose content-type contains
+            "json" or whose body starts with "{" or "[".
+        host_substr: If set, filter to URLs containing this substring.
+    """
+    from browser_harness.helpers import js
+    import json as _json
+    raw = js("return JSON.stringify(window._req || [])")
+    reqs = _json.loads(raw) if raw else []
+    if host_substr:
+        reqs = [r for r in reqs if host_substr in r.get("url", "")]
+    if only_json:
+        reqs = [
+            r for r in reqs
+            if "json" in r.get("ct", "").lower()
+            or r.get("bodyHead", "").startswith("{")
+            or r.get("bodyHead", "").startswith("[")
+        ]
+    return reqs
+
+
+def page_fetch_json(url, headers=None, method="GET", body=None):
+    """Call ``url`` from within the active page's JS context, returning the
+    parsed JSON. Cookies, CF clearance, CSRF tokens, and same-origin auth
+    headers all attach automatically — this is the right primitive for hitting
+    site APIs once the browser has past their anti-bot layer.
+    """
+    from browser_harness.helpers import js
+    import json as _json
+    opts = {"method": method, "headers": {"accept": "application/json", **(headers or {})}}
+    if body is not None:
+        opts["body"] = body if isinstance(body, str) else _json.dumps(body)
+    opts_js = _json.dumps(opts)
+    expr = (
+        "return fetch(" + _json.dumps(url) + ", " + opts_js + ")"
+        ".then(r => r.text())"
+        ".then(t => { try { return JSON.parse(t); } catch(e) { return {__raw: t}; } });"
+    )
+    return js(expr)
+
+
 def human_scroll_into_view_selector(selector, cfg=None):
     """Scroll ``selector`` into view using cloak's accelerate/cruise/decelerate
     wheel pattern. Returns the final bounding box and updates cursor position.

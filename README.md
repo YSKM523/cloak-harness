@@ -94,16 +94,23 @@ browser-harness -c '
 '
 ```
 
-## Example: scrape a real site
+## Examples
 
-See [`examples/homedepot_lumber.py`](examples/homedepot_lumber.py) for a complete ~80-line scraper that pulls 2x4 lumber prices from Home Depot Canada through the stealth stack. Run it once `start-cloak.sh` is up:
+Two scrapers against the same target (Home Depot Canada, 2x4 lumber), showing the two main approaches:
+
+| Example | Approach | When to use |
+|---|---|---|
+| [`examples/homedepot_lumber.py`](examples/homedepot_lumber.py) | innerText parsing | Quick prototyping; sites without obvious JSON APIs |
+| [`examples/homedepot_lumber_api.py`](examples/homedepot_lumber_api.py) | Direct JSON API via `page_fetch_json` | Production scraping. ~10-50x faster, structured data, redesign-proof |
+
+The API approach uses the helpers `install_xhr_recorder()` + `recorded_requests()` + `page_fetch_json()` exposed from `agent_helpers.py`. See [`docs/reverse-engineering.md`](docs/reverse-engineering.md) for the methodology of discovering a site's hidden APIs and replaying them through the validated browser session.
+
+Run either:
 
 ```bash
 export BU_CDP_URL=http://127.0.0.1:9222
-browser-harness -c "$(cat examples/homedepot_lumber.py)"
+browser-harness -c "$(cat examples/homedepot_lumber_api.py)"
 ```
-
-Outputs structured JSON (product titles + prices) and demonstrates the full flow: `goto_url` → human-like mouse motion → `js()` extraction.
 
 ## With a residential proxy
 
