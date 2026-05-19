@@ -94,6 +94,17 @@ browser-harness -c '
 '
 ```
 
+## Example: scrape a real site
+
+See [`examples/homedepot_lumber.py`](examples/homedepot_lumber.py) for a complete ~80-line scraper that pulls 2x4 lumber prices from Home Depot Canada through the stealth stack. Run it once `start-cloak.sh` is up:
+
+```bash
+export BU_CDP_URL=http://127.0.0.1:9222
+browser-harness -c "$(cat examples/homedepot_lumber.py)"
+```
+
+Outputs structured JSON (product titles + prices) and demonstrates the full flow: `goto_url` → human-like mouse motion → `js()` extraction.
+
 ## With a residential proxy
 
 ```bash
