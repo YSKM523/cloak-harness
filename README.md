@@ -8,7 +8,7 @@ A bridge wiring [CloakBrowser](https://github.com/CloakHQ/CloakBrowser) (stealth
 
 ## What this is and isn't
 
-- **Is**: ~250 lines of integration glue (`agent-workspace/agent_helpers.py`), launch scripts (`scripts/`), and a documented setup recipe with honest benchmark results.
+- **Is**: one integration helper module (`agent-workspace/agent_helpers.py`), launch scripts (`scripts/`), examples, and a documented setup recipe with honest benchmark results.
 - **Is not** a new stealth engine — all browser fingerprint patches come from upstream CloakBrowser.
 - **Is not** a new agent harness — all CDP wrapping, daemon, and agent loop come from upstream browser-harness.
 - **Is not** a CAPTCHA solver. If the target shows a visible challenge widget, you still need a solver service.
@@ -63,7 +63,7 @@ cd ~/Developer/browser-harness
 uv tool install -e .
 
 # 3. This repo
-git clone https://github.com/<you>/cloak-harness ~/Developer/cloak-harness
+git clone https://github.com/YSKM523/cloak-harness ~/Developer/cloak-harness
 
 # 4. Point browser-harness at our agent_helpers.py
 mkdir -p ~/Developer/browser-harness/agent-workspace
@@ -73,6 +73,10 @@ ln -sf ~/Developer/cloak-harness/agent-workspace/agent_helpers.py \
 # 5. Tell agent_helpers.py where cloak lives
 export CLOAK_SITE_PACKAGES=~/.cloak-harness/venv/lib/python3.11/site-packages
 ```
+
+The launch scripts also use the same venv automatically when resolving the
+CloakBrowser binary. If you installed CloakBrowser somewhere else, set
+`CLOAK_PYTHON=/path/to/python` or `CLOAK_BIN=/path/to/chrome`.
 
 ## Quick start
 
@@ -127,6 +131,7 @@ Run multiple identities side by side. Each persona has its own profile (cookies,
 ./scripts/start-cloak.sh                       # default persona
 ./scripts/start-cloak.sh --persona alice       # named persona
 PERSONA=alice ./scripts/start-cloak.sh         # same
+./scripts/start-with-proxy.sh 0 --persona alice # proxy session with same persona
 ```
 
 Profiles live under `~/.cloak-harness/personas/<name>/`. The fingerprint seed is generated once per persona and reused, so the same persona always looks like the same machine. Combined with cookie persistence, this drops anti-bot scoring noticeably on returning visits.
@@ -174,6 +179,9 @@ $EDITOR proxies.txt
 
 # Launch with the first proxy
 ./scripts/start-with-proxy.sh 0
+
+# Or launch with a named persona, preserving the same profile and fingerprint
+./scripts/start-with-proxy.sh 0 --persona alice
 ```
 
 The forwarder script translates Chromium's inline-auth-incapable `--proxy-server` flag into a clean local hop that handles Basic auth upstream. Useful for any HTTP/HTTPS proxy provider that requires user:pass auth.
@@ -200,9 +208,11 @@ Environment variables read by the scripts and helpers:
 |---|---|---|
 | `CDP_PORT` | `9222` | Chromium DevTools port |
 | `CLOAK_BIN` | resolved from `cloakbrowser.binary_info()` | Override path to cloak Chromium binary |
+| `CLOAK_PYTHON` | `~/.cloak-harness/venv/bin/python`, then `python3` | Python interpreter used to import `cloakbrowser` and resolve `CLOAK_BIN` |
 | `CLOAK_SITE_PACKAGES` | _unset_ | Path to a venv site-packages where `cloakbrowser` is importable (used by `agent_helpers.py`) |
-| `PROFILE` | `~/.cloak-harness/profile[-proxy]` | Persistent user-data-dir |
-| `FINGERPRINT` | random | Cloak's per-session fingerprint seed |
+| `PERSONA` | `default` | Persona name used by launch scripts when `--persona` is not passed |
+| `PROFILE` | `~/.cloak-harness/personas/<persona>/profile` | Persistent user-data-dir |
+| `FINGERPRINT` | generated once per persona | Cloak's fingerprint seed; reused from the persona fingerprint file |
 | `FINGERPRINT_PLATFORM` | `windows` | Platform that cloak should mimic |
 | `LOCAL_PORT` | `18888` | Local proxy forwarder bind port |
 | `PROXIES_FILE` | `./proxies.txt` | Proxy list path |
@@ -219,7 +229,7 @@ cloak-harness/
 │   ├── start-with-proxy.sh          # launch stealth Chromium through proxy
 │   └── proxy-forwarder.py           # upstream-auth CONNECT forwarder
 ├── agent-workspace/
-│   └── agent_helpers.py             # the integration glue (~250 lines)
+│   └── agent_helpers.py             # the integration glue and helper API
 └── docs/
     ├── results.md                   # benchmark results
     └── known-issues.md              # upstream bugs + workarounds

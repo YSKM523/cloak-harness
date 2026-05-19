@@ -20,7 +20,7 @@ fi
 
 CDP_PORT=${CDP_PORT:-9222}
 PERSONA_DIR="$HOME/.cloak-harness/personas/$PERSONA"
-PROFILE="$PERSONA_DIR/profile"
+PROFILE=${PROFILE:-"$PERSONA_DIR/profile"}
 FINGERPRINT_FILE="$PERSONA_DIR/fingerprint"
 FINGERPRINT_PLATFORM=${FINGERPRINT_PLATFORM:-windows}
 
@@ -38,7 +38,18 @@ fi
 if [[ -n "${CLOAK_BIN:-}" ]]; then
     BIN="$CLOAK_BIN"
 else
-    BIN=$(python3 -c "from cloakbrowser import binary_info; print(binary_info()['binary_path'])")
+    if [[ -n "${CLOAK_PYTHON:-}" ]]; then
+        PY="$CLOAK_PYTHON"
+    elif [[ -x "$HOME/.cloak-harness/venv/bin/python" ]]; then
+        PY="$HOME/.cloak-harness/venv/bin/python"
+    else
+        PY="$(command -v python3)"
+    fi
+    if ! BIN=$("$PY" -c "from cloakbrowser import binary_info; print(binary_info()['binary_path'])"); then
+        echo "Could not import cloakbrowser with $PY." >&2
+        echo "Install it via ~/.cloak-harness/venv/bin/pip install cloakbrowser, set CLOAK_PYTHON, or set CLOAK_BIN." >&2
+        exit 1
+    fi
 fi
 
 ARGS=(

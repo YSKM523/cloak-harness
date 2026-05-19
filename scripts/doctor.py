@@ -86,10 +86,18 @@ try:
     check("Browser timezone matches egress IP geolocation",
           actual_tz == expected_tz,
           f"mismatch — set via `cdp('Emulation.setTimezoneOverride', timezoneId='{expected_tz}')`" if actual_tz != expected_tz else "")
-    check("Egress IP looks residential (not datacenter)",
-          ipdata.get("org", "").lower() not in {"", "amazon", "google", "digitalocean"} and
-          "AS" in ipdata.get("org", ""),
-          f"org: `{ipdata.get('org', '?')}`")
+    org = ipdata.get("org", "") or ""
+    org_lower = org.lower()
+    datacenter_markers = (
+        "amazon", "aws", "google", "digitalocean", "microsoft", "azure",
+        "oracle", "ovh", "hetzner", "linode", "akamai", "vultr", "choopa",
+        "leaseweb", "contabo", "cloudflare", "datacamp", "m247",
+        "colo", "colocation", "hosting", "datacenter", "data center",
+    )
+    obvious_datacenter = any(marker in org_lower for marker in datacenter_markers)
+    check("Egress IP is not an obvious datacenter ASN",
+          bool(org) and "AS" in org and not obvious_datacenter,
+          f"org: `{org or '?'}`")
 except Exception as e:
     line(f"  could not reach ipinfo.io: {e}")
 
