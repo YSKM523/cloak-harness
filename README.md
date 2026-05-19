@@ -104,6 +104,10 @@ Two scrapers against the same target (Home Depot Canada, 2x4 lumber), showing th
 | [`examples/homedepot_lumber_api.py`](examples/homedepot_lumber_api.py) | Direct JSON API via `page_fetch_json` | Production scraping. ~10-50x faster, structured data, redesign-proof |
 | [`examples/api_discovery.py`](examples/api_discovery.py) | Full discovery workflow — recorder → GraphQL detection → signing detection → schema inference → paginate | Mapping a new target site end-to-end |
 
+![api discovery demo](docs/media/api-discovery.gif)
+
+*Output of `examples/api_discovery.py` against Home Depot Canada: warms session, dumps captured JSON endpoints, runs GraphQL + signing detection, sketches response schema, and paginates the discovered search API to collect 60 products.*
+
 The API approach uses these helpers from `agent_helpers.py`:
 
 - `install_xhr_recorder()` + `recorded_requests()` — capture every fetch/XHR (incl. request bodies)
