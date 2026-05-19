@@ -1,0 +1,7 @@
+# One proxy per line: host:port:user:pass
+# Used by scripts/start-with-proxy.sh and scripts/proxy-forwarder.py.
+# Copy this file to proxies.txt and fill in your own credentials.
+#
+# Examples:
+# proxy.example.com:8080:myuser:mypass
+# residential.example.com:12321:myuser:session-abc_country-us

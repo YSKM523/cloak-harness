@@ -1,0 +1,20 @@
+# Proxy credentials — never commit
+proxies.txt
+*.env
+
+# Logs and runtime artifacts
+*.log
+/tmp/
+profile/
+profile-proxy/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
