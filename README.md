@@ -2,6 +2,10 @@
 
 A bridge wiring [CloakBrowser](https://github.com/CloakHQ/CloakBrowser) (stealth Chromium binary) and [browser-harness](https://github.com/browser-use/browser-harness) (LLM-driven CDP harness) so they cooperate cleanly: cloak provides the indistinguishable-from-real-Chrome process, browser-harness provides the agent control loop, and this repo adds the glue so cloak's human-like input flows through the harness's CDP path.
 
+![cloak-harness demo](docs/media/demo.gif)
+
+*Form filled by an LLM agent through `browser-harness`, with each keystroke and click going through `cloak`'s human-like input adapter (Bezier mouse trajectory, per-key timing, aim/hold delays). All inside a stealth Chromium that passes most bot-detection benchmarks. See [`docs/results.md`](docs/results.md) for the full table.*
+
 ## What this is and isn't
 
 - **Is**: ~250 lines of integration glue (`agent-workspace/agent_helpers.py`), launch scripts (`scripts/`), and a documented setup recipe with honest benchmark results.
