@@ -254,8 +254,10 @@ def install_xhr_recorder():
     """Inject a fetch + XMLHttpRequest interceptor that survives navigations
     and accumulates `window._req` with one entry per request.
 
-    Each entry has: {t, url, method, status, ct, bodyHead, xhr?}.
-    `bodyHead` is the first 600 chars of the response body (text/JSON only).
+    Each entry has: {t, url, method, status, ct, bodyHead, reqBody?, xhr?}.
+    - ``bodyHead``: first 600 chars of the *response* body (text/JSON only)
+    - ``reqBody``: first 2000 chars of the *request* body (POST/PUT) — needed
+      to replay GraphQL operations (which carry query+variables in the body)
 
     Use to reverse-engineer a site's hidden JSON APIs before scripting them
     directly. Typical flow:
@@ -274,6 +276,14 @@ def install_xhr_recorder():
             window.fetch = async function(...args) {
                 const url = typeof args[0] === 'string' ? args[0] : args[0].url;
                 const opts = args[1] || {};
+                let reqBody = '';
+                if (opts.body) {
+                    try {
+                        if (typeof opts.body === 'string') reqBody = opts.body.slice(0, 2000);
+                        else if (opts.body instanceof FormData) reqBody = '[FormData]';
+                        else reqBody = String(opts.body).slice(0, 2000);
+                    } catch(e) {}
+                }
                 const t = performance.now();
                 try {
                     const r = await origFetch.apply(this, args);
@@ -282,21 +292,30 @@ def install_xhr_recorder():
                     if (ct.includes('json') || ct.includes('text')) {
                         try { bodyHead = (await r.clone().text()).slice(0, 600); } catch(e) {}
                     }
-                    window._req.push({t: Math.round(t), url, method: opts.method||'GET', status: r.status, ct, bodyHead});
+                    window._req.push({t: Math.round(t), url, method: opts.method||'GET', status: r.status, ct, bodyHead, reqBody});
                     return r;
                 } catch(e) {
-                    window._req.push({t: Math.round(t), url, method: opts.method||'GET', status: 'ERR', error: String(e)});
+                    window._req.push({t: Math.round(t), url, method: opts.method||'GET', status: 'ERR', error: String(e), reqBody});
                     throw e;
                 }
             };
             const origOpen = XMLHttpRequest.prototype.open;
             const origSend = XMLHttpRequest.prototype.send;
             XMLHttpRequest.prototype.open = function(method, url) { this._url=url; this._method=method; return origOpen.apply(this, arguments); };
-            XMLHttpRequest.prototype.send = function() {
+            XMLHttpRequest.prototype.send = function(body) {
+                let reqBody = '';
+                if (body) {
+                    try {
+                        if (typeof body === 'string') reqBody = body.slice(0, 2000);
+                        else if (body instanceof FormData) reqBody = '[FormData]';
+                        else reqBody = String(body).slice(0, 2000);
+                    } catch(e) {}
+                }
+                this._reqBody = reqBody;
                 this.addEventListener('load', () => {
                     let bodyHead = '';
                     try { bodyHead = (this.responseText || '').slice(0, 600); } catch(e) {}
-                    window._req.push({t: Math.round(performance.now()), url: this._url, method: this._method, status: this.status, ct: this.getResponseHeader('content-type')||'', bodyHead, xhr: true});
+                    window._req.push({t: Math.round(performance.now()), url: this._url, method: this._method, status: this.status, ct: this.getResponseHeader('content-type')||'', bodyHead, reqBody: this._reqBody||'', xhr: true});
                 });
                 return origSend.apply(this, arguments);
             };
@@ -346,6 +365,228 @@ def page_fetch_json(url, headers=None, method="GET", body=None):
         ".then(t => { try { return JSON.parse(t); } catch(e) { return {__raw: t}; } });"
     )
     return js(expr)
+
+
+# --- API discovery and replay ---------------------------------------------
+
+import re as _re
+
+_SIG_PARAM_NAMES = {
+    "sig", "signature", "_signature", "sign", "_sign",
+    "token", "_token", "csrf", "csrf_token", "_csrf",
+    "hash", "_hash", "checksum", "_checksum",
+    "nonce", "_nonce", "salt", "_salt",
+    "timestamp", "_t", "_ts", "ts", "expires",
+    "auth", "authorization", "_auth",
+}
+
+_HEX_RE = _re.compile(r"^[0-9a-fA-F]+$")
+
+
+def detect_graphql(requests=None):
+    """Identify GraphQL operations among recorded requests.
+
+    Returns a list of entries with:
+        endpoint, operationName, query, variables, persistedQueryHash,
+        count, sampleResponseHead
+
+    Multiple calls to the same operation are coalesced (count incremented).
+
+    Pass in a request list from recorded_requests(), or omit to pull live.
+    """
+    import json as _json
+    if requests is None:
+        requests = recorded_requests()
+
+    by_op = {}
+    for r in requests:
+        url = r.get("url", "")
+        body_head = r.get("bodyHead", "")
+        req_body = r.get("reqBody", "")
+        # GraphQL signal: URL contains "graphql" OR request body has
+        # query/variables, OR response has data/errors envelope.
+        is_gql_url = "graphql" in url.lower()
+        is_gql_req = req_body.startswith("{") and (
+            '"query"' in req_body or '"operationName"' in req_body
+            or '"persistedQuery"' in req_body
+        )
+        is_gql_resp = body_head.startswith("{") and (
+            '"data"' in body_head[:200] or '"errors"' in body_head[:200]
+        )
+        if not (is_gql_url or is_gql_req or is_gql_resp):
+            continue
+
+        op_name = query = variables = persisted_hash = None
+        try:
+            if req_body.startswith("{"):
+                req_json = _json.loads(req_body)
+                op_name = req_json.get("operationName")
+                query = req_json.get("query")
+                variables = req_json.get("variables")
+                ext = req_json.get("extensions") or {}
+                pq = ext.get("persistedQuery") or {}
+                persisted_hash = pq.get("sha256Hash") or pq.get("hash")
+        except Exception:
+            pass
+
+        if not op_name:
+            try:
+                response = _json.loads(body_head) if body_head.startswith("{") else {}
+                if isinstance(response.get("data"), dict):
+                    keys = list(response["data"].keys())
+                    op_name = keys[0] if keys else None
+            except Exception:
+                pass
+
+        endpoint = url.split("?", 1)[0]
+        key = (endpoint, op_name, persisted_hash)
+        entry = by_op.setdefault(key, {
+            "endpoint": endpoint,
+            "operationName": op_name,
+            "persistedQueryHash": persisted_hash,
+            "query": (query[:400] + "...") if isinstance(query, str) and len(query) > 400 else query,
+            "variables": variables,
+            "count": 0,
+            "sampleResponseHead": body_head[:300],
+        })
+        entry["count"] += 1
+    return list(by_op.values())
+
+
+def detect_signed_requests(requests=None):
+    """Flag captured requests whose URL or params look like they carry a
+    one-time signature/token, suggesting the endpoint needs to be replayed
+    via the page (not direct curl) or its signing code reverse-engineered.
+
+    Returns a list of {url, method, signed_params, hex_params, reason}.
+    """
+    from urllib.parse import urlparse, parse_qsl
+    if requests is None:
+        requests = recorded_requests()
+
+    flagged = []
+    for r in requests:
+        url = r.get("url", "")
+        if not url.startswith("http") and not url.startswith("/"):
+            continue
+        parsed = urlparse(url if url.startswith("http") else "http://x" + url)
+        params = dict(parse_qsl(parsed.query))
+        if not params:
+            continue
+        signed = []
+        hex_like = []
+        for k, v in params.items():
+            kl = k.lower().lstrip("_")
+            if kl in _SIG_PARAM_NAMES or k in _SIG_PARAM_NAMES:
+                signed.append({k: v[:40] + ("..." if len(v) > 40 else "")})
+            elif len(v) >= 24 and _HEX_RE.match(v):
+                hex_like.append({k: v[:40] + ("..." if len(v) > 40 else "")})
+            elif len(v) >= 40 and _re.match(r"^[A-Za-z0-9_\-+/=]+$", v):
+                # base64-ish long opaque string
+                hex_like.append({k: v[:40] + ("..." if len(v) > 40 else "")})
+        if signed or hex_like:
+            reason = []
+            if signed:
+                reason.append(f"named signature/token param(s): {', '.join(d for s in signed for d in s.keys())}")
+            if hex_like:
+                reason.append(f"opaque long value(s): {', '.join(d for s in hex_like for d in s.keys())}")
+            flagged.append({
+                "url": url[:160],
+                "method": r.get("method", "GET"),
+                "signed_params": signed,
+                "opaque_params": hex_like,
+                "reason": "; ".join(reason),
+            })
+    return flagged
+
+
+def paginate_api(url_template, items_key, page_param="page", start=1,
+                 max_pages=20, page_size=None, page_size_param=None,
+                 sleep_seconds=0.4, on_page=None, stop_when_empty=True):
+    """Loop page_fetch_json over a paginated endpoint, accumulating results.
+
+    Args:
+        url_template: URL with a "{page}" placeholder, e.g.
+            "/api/search/v1/search?q=2x4&page={page}&pageSize=40&lang=en"
+        items_key: JSON key whose value is the list of items per page.
+        page_param: Name of the page parameter (informational only).
+        start: First page index.
+        max_pages: Hard ceiling on iterations.
+        page_size: If set with page_size_param, substituted as {page_size}.
+        page_size_param: Name of the page-size parameter (informational).
+        sleep_seconds: Courtesy pause between requests.
+        on_page: Optional callable(page_idx, data, items) called per page.
+        stop_when_empty: Stop iterating when items list is empty.
+
+    Returns the accumulated list of items.
+    """
+    import time as _time
+    all_items = []
+    page = start
+    while page < start + max_pages:
+        kwargs = {"page": page}
+        if page_size is not None:
+            kwargs["page_size"] = page_size
+        url = url_template.format(**kwargs)
+        data = page_fetch_json(url)
+        items = data.get(items_key) if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            items = []
+        if on_page:
+            on_page(page, data, items)
+        if stop_when_empty and not items:
+            break
+        all_items.extend(items)
+        page += 1
+        if sleep_seconds:
+            _time.sleep(sleep_seconds)
+    return all_items
+
+
+def infer_schema(value, max_examples=2, _path="$"):
+    """Produce a human-readable type sketch of a JSON value.
+
+    Useful after fetching a single sample to understand response shape
+    before scripting the loop. Example output:
+
+        {
+          "products": [list of 5 ⇒ {
+            "name": str,
+            "pricing": {
+              "displayPrice": {"value": float, "formattedValue": str}
+            }
+          }],
+          "metadata": {"totalCount": int}
+        }
+    """
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, str):
+        if len(value) <= 30:
+            return f"str({value!r})" if max_examples > 0 else "str"
+        return "str"
+    if isinstance(value, list):
+        if not value:
+            return "list (empty)"
+        # Merge schemas of first few elements
+        samples = [infer_schema(x, max_examples, _path + "[]") for x in value[:max_examples]]
+        # If all same, present as "list of <schema>"; else show first 2 variants
+        unique = []
+        for s in samples:
+            if s not in unique:
+                unique.append(s)
+        if len(unique) == 1:
+            return {"_list_of": unique[0], "_len": len(value)}
+        return {"_list_of_variant": unique, "_len": len(value)}
+    if isinstance(value, dict):
+        return {k: infer_schema(v, max_examples, f"{_path}.{k}") for k, v in value.items()}
+    return type(value).__name__
 
 
 def human_scroll_into_view_selector(selector, cfg=None):

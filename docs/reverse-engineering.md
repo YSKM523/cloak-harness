@@ -8,17 +8,21 @@ Scraping rendered HTML/innerText is the wrong default. It's slow, fragile (selec
 
 This is dramatically faster (one ~200KB JSON request vs a full page render) and returns clean structured data (numbers, not formatted strings).
 
-## The two helpers in this repo
+## Helpers in this repo
 
-`agent_helpers.py` exposes two functions that make this workflow easy:
+`agent_helpers.py` exposes these functions covering the full discovery loop:
 
-```python
-install_xhr_recorder()     # injects fetch/XHR interceptor (survives navigations)
-recorded_requests(only_json=True, host_substr="example.com")  # read captured requests
-page_fetch_json(url, headers=None, method="GET", body=None)   # call API from page context
-```
+| Helper | What it does |
+|---|---|
+| `install_xhr_recorder()` | Inject `fetch` + `XMLHttpRequest` interceptors (survives navigations) capturing URL, method, status, content-type, response body head, and **request body** (needed for GraphQL replay). |
+| `recorded_requests(only_json=True, host_substr=...)` | Pull the captured request list, optionally filtered. |
+| `page_fetch_json(url, method, headers, body)` | Call an API from inside the page's JS context — cookies, anti-bot tokens, TLS fingerprint all attach automatically. |
+| `detect_graphql()` | Among captured requests, surface GraphQL operations with their `operationName`, full `query`, `variables`, and `persistedQueryHash` if present. Coalesces duplicate ops. |
+| `detect_signed_requests()` | Flag URLs carrying signature-shaped params (`sig`, `_token`, long hex/base64 opaque values), suggesting the endpoint requires page-context replay or signing-code reverse-engineering. |
+| `paginate_api(template, items_key, max_pages, ...)` | Loop `page_fetch_json` over a paginated endpoint, accumulating items. Supports per-page callback. |
+| `infer_schema(value)` | Produce a human-readable type sketch of a JSON value — paste a single sample, see the full response shape. |
 
-`install_xhr_recorder()` hooks both `window.fetch` and `XMLHttpRequest` via `Page.addScriptToEvaluateOnNewDocument`, so it captures everything from the moment a new document loads — including requests that fire before any user code runs.
+`install_xhr_recorder()` hooks via `Page.addScriptToEvaluateOnNewDocument`, so it captures everything from the moment a new document loads — including requests that fire before any user code runs.
 
 ## Workflow
 
@@ -103,3 +107,34 @@ Calling an API directly is dramatically faster than browsing — easy to fire hu
 
 - [`examples/homedepot_lumber.py`](../examples/homedepot_lumber.py) — innerText baseline.
 - [`examples/homedepot_lumber_api.py`](../examples/homedepot_lumber_api.py) — same target via the discovered JSON API.
+- [`examples/api_discovery.py`](../examples/api_discovery.py) — full discovery workflow showing all seven helpers working together (recorder → graphql detection → signing detection → schema inference → paginate).
+
+## GraphQL replay specifics
+
+`detect_graphql()` returns operations with their full `query`, `variables`, and `persistedQueryHash`. To replay one:
+
+```python
+op = next(o for o in detect_graphql() if o["operationName"] == "GetProducts")
+
+# Standard GraphQL replay
+result = page_fetch_json(op["endpoint"], method="POST",
+    headers={"content-type": "application/json"},
+    body={
+        "operationName": op["operationName"],
+        "query": op["query"],
+        "variables": {**op["variables"], "page": 2},  # change pagination param
+    })
+
+# Persisted-query replay (when the server doesn't accept arbitrary queries)
+result = page_fetch_json(op["endpoint"], method="POST",
+    headers={"content-type": "application/json"},
+    body={
+        "operationName": op["operationName"],
+        "variables": {**op["variables"], "page": 2},
+        "extensions": {"persistedQuery": {
+            "version": 1, "sha256Hash": op["persistedQueryHash"]
+        }},
+    })
+```
+
+Many large sites (Twitter/X, Shopify storefronts) use persisted queries. You can't change the query text, but you can usually change `variables` to paginate or filter.

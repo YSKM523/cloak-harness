@@ -102,8 +102,18 @@ Two scrapers against the same target (Home Depot Canada, 2x4 lumber), showing th
 |---|---|---|
 | [`examples/homedepot_lumber.py`](examples/homedepot_lumber.py) | innerText parsing | Quick prototyping; sites without obvious JSON APIs |
 | [`examples/homedepot_lumber_api.py`](examples/homedepot_lumber_api.py) | Direct JSON API via `page_fetch_json` | Production scraping. ~10-50x faster, structured data, redesign-proof |
+| [`examples/api_discovery.py`](examples/api_discovery.py) | Full discovery workflow — recorder → GraphQL detection → signing detection → schema inference → paginate | Mapping a new target site end-to-end |
 
-The API approach uses the helpers `install_xhr_recorder()` + `recorded_requests()` + `page_fetch_json()` exposed from `agent_helpers.py`. See [`docs/reverse-engineering.md`](docs/reverse-engineering.md) for the methodology of discovering a site's hidden APIs and replaying them through the validated browser session.
+The API approach uses these helpers from `agent_helpers.py`:
+
+- `install_xhr_recorder()` + `recorded_requests()` — capture every fetch/XHR (incl. request bodies)
+- `page_fetch_json()` — replay any endpoint from inside the validated browser session
+- `detect_graphql()` — surface GraphQL ops with full query, variables, persisted hash
+- `detect_signed_requests()` — flag endpoints carrying signature/token params
+- `paginate_api()` — loop a paginated endpoint with backoff and per-page callback
+- `infer_schema()` — type-sketch a JSON sample to map response shape
+
+See [`docs/reverse-engineering.md`](docs/reverse-engineering.md) for the methodology and full replay snippets (including GraphQL persisted-query replay).
 
 Run either:
 
